@@ -4,6 +4,7 @@ from PIL import Image
 from PIL.PngImagePlugin import PngInfo
 import sys
 from tqdm import tqdm
+from datetime import datetime
 
 def extract_png_metadata(png_path):
     """
@@ -19,13 +20,10 @@ def extract_png_metadata(png_path):
         for key in ['prompt', 'workflow']:
             if key in img.text:
                 try:
-                    # Пытаемся десериализовать как JSON
                     metadata[key] = json.loads(img.text[key])
                 except json.JSONDecodeError:
-                    # Если не JSON — сохраняем как строку
                     metadata[key] = img.text[key]
 
-        # Для совместимости с ComfyUI: если есть 'extra_pnginfo' в tEXt — тоже извлекаем
         if 'extra_pnginfo' in img.text:
             try:
                 metadata['extra_pnginfo'] = json.loads(img.text['extra_pnginfo'])
@@ -45,57 +43,40 @@ def create_exif_for_webp(metadata_dict):
       - prompt: -> 0x0110 (UserComment)
       - workflow: -> 0x010f (ImageDescription)
       - extra_pnginfo keys -> 0x010e, 0x010d, ... (в обратном порядке)
-
-    Возвращает объект Image.Exif
     """
     from PIL import Image
 
     exif = Image.Exif()
 
-    # Записываем prompt в 0x0110 (UserComment)
     if 'prompt' in metadata_dict:
         value = json.dumps(metadata_dict['prompt'], ensure_ascii=False) if isinstance(metadata_dict['prompt'], dict) else str(metadata_dict['prompt'])
         exif[0x0110] = f"prompt:{value}"
 
-    # Записываем workflow в 0x010f (ImageDescription)
     if 'workflow' in metadata_dict:
         value = json.dumps(metadata_dict['workflow'], ensure_ascii=False) if isinstance(metadata_dict['workflow'], dict) else str(metadata_dict['workflow'])
         exif[0x010f] = f"workflow:{value}"
 
-    # Записываем extra_pnginfo в теги 0x010e, 0x010d, ... (в обратном порядке)
     if 'extra_pnginfo' in metadata_dict and isinstance(metadata_dict['extra_pnginfo'], dict):
-        tag_id = 0x010e  # Начинаем с ImageDescription-1
+        tag_id = 0x010e
         for key, value in metadata_dict['extra_pnginfo'].items():
             json_value = json.dumps(value, ensure_ascii=False) if isinstance(value, (dict, list)) else str(value)
             exif[tag_id] = f"{key}:{json_value}"
-            tag_id -= 1  # Уменьшаем ID для следующего тега
+            tag_id -= 1
 
     return exif
 
 
-def save_webp_with_metadata(png_path, output_path=None, quality=80, method=4, lossless=False):
+def save_webp_with_metadata(png_path, output_path, quality=80, method=4, lossless=False):
     """
-    Конвертирует PNG в WEBP, перенося метаданные в EXIF-теги в формате ComfyUI.
-    Использует теги:
-      - prompt: -> 0x0110 (UserComment)
-      - workflow: -> 0x010f (ImageDescription)
-      - extra_pnginfo keys -> 0x010e, 0x010d, ... (в обратном порядке)
+    Конвертирует PNG в WEBP с сохранением метаданных в EXIF.
+    Возвращает True при успехе, False при ошибке.
     """
     try:
-        # Открываем PNG
         img = Image.open(png_path)
-
-        # Извлекаем метаданные
         metadata_dict = extract_png_metadata(png_path)
-
-        # Создаём EXIF с корректными тегами
         exif = create_exif_for_webp(metadata_dict)
 
-        # Если output_path не задан — генерируем на основе png_path
-        if output_path is None:
-            output_path = os.path.splitext(png_path)[0] + ".webp"
-
-        # Сохраняем как WEBP с EXIF
+        # Сохраняем WEBP
         img.save(
             output_path,
             format='WEBP',
@@ -128,8 +109,7 @@ def save_webp_with_metadata(png_path, output_path=None, quality=80, method=4, lo
 
 def process_directory(directory):
     """
-    Рекурсивно обходит директорию и конвертирует все PNG в WEBP.
-    Возвращает список всех найденных PNG-файлов.
+    Рекурсивно находит все PNG-файлы и возвращает список с путями.
     """
     png_files = []
     for root, _, files in os.walk(directory):
@@ -139,11 +119,26 @@ def process_directory(directory):
     return png_files
 
 
+def get_creation_date(png_path):
+    """
+    Возвращает дату создания файла в формате YYYY_MM_DD.
+    Использует время создания (ctime) как fallback, если modification time недоступен.
+    """
+    try:
+        # Получаем время создания файла (на Windows — ctime, на Unix — иногда тоже ctime)
+        # В большинстве случаев это то, что нужно для сортировки по дате создания
+        timestamp = os.path.getctime(png_path)
+        return datetime.fromtimestamp(timestamp).strftime('%Y_%m_%d')
+    except Exception:
+        # Если не получилось — возвращаем текущую дату как fallback
+        return datetime.now().strftime('%Y_%m_%d')
+
+
 def main():
-    # Проверяем, был ли файл/папка передан через drag & drop
     if len(sys.argv) < 2:
         print("🔹 Использование: Перетащите PNG-файл или папку на эту иконку.")
-        print("🔹 Скрипт конвертирует все .png в .webp с сохранением метаданных ComfyUI.")
+        print("🔹 Скрипт конвертирует все .png в .webp с сохранением метаданных ComfyUI")
+        print("🔹 Все файлы сохраняются в подпапки `webp/YYYY_MM_DD/` в корне исходной папки")
         input("\nНажмите Enter для выхода...")
         return
 
@@ -157,10 +152,12 @@ def main():
     # Определяем, файл это или папка
     if os.path.isfile(path) and path.lower().endswith('.png'):
         files_to_convert = [path]
+        base_dir = os.path.dirname(path)
         print(f"📄 Обработка одного файла: {path}")
     elif os.path.isdir(path):
         print(f"📁 Обработка папки: {path}")
         files_to_convert = process_directory(path)
+        base_dir = path
         print(f"   Найдено {len(files_to_convert)} PNG-файлов.")
     else:
         print(f"❌ Указанный путь не является PNG-файлом или папкой: {path}")
@@ -172,20 +169,41 @@ def main():
         input("\nНажмите Enter для выхода...")
         return
 
-    # Обработка с прогресс-баром tqdm
+    # Определяем корневую папку для сохранения: base_dir/webp/
+    webp_root = os.path.join(base_dir, "webp")
+    os.makedirs(webp_root, exist_ok=True)
+
     converted_count = 0
     failed_count = 0
 
+    # Обработка с прогресс-баром
     for png_path in tqdm(files_to_convert, desc="🔄 Конвертация PNG → WEBP", unit="файл"):
-        success = save_webp_with_metadata(png_path)
-        if success:
-            converted_count += 1
-        else:
+        try:
+            # Получаем дату создания файла
+            date_folder = get_creation_date(png_path)
+            subfolder_path = os.path.join(webp_root, date_folder)
+            os.makedirs(subfolder_path, exist_ok=True)
+
+            # Генерируем имя файла: сохраняем исходное имя, но с .webp
+            filename = os.path.basename(png_path)
+            output_path = os.path.join(subfolder_path, os.path.splitext(filename)[0] + ".webp")
+
+            # Конвертируем
+            success = save_webp_with_metadata(png_path, output_path)
+
+            if success:
+                converted_count += 1
+            else:
+                failed_count += 1
+
+        except Exception as e:
+            print(f"❌ Ошибка при обработке {png_path}: {e}")
             failed_count += 1
 
     print(f"\n✅ Готово! Успешно: {converted_count}, Ошибки: {failed_count}")
+    print(f"📁 Все файлы сохранены в: {webp_root}")
 
-    # Пауза перед закрытием окна
+    # Пауза перед закрытием
     input("\nНажмите Enter, чтобы закрыть окно...")
 
 
