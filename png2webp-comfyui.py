@@ -4,6 +4,8 @@ from PIL import Image
 from PIL.PngImagePlugin import PngInfo
 import sys
 from datetime import datetime
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import multiprocessing
 
 # Try to import tqdm, fall back to simple progress if not available
 try:
@@ -73,11 +75,13 @@ def create_exif_for_webp(metadata_dict):
     return exif
 
 
-def save_webp_with_metadata(png_path, output_path, quality=80, method=4, lossless=False):
+def save_webp_with_metadata(args):
     """
-    Converts PNG to WEBP and embeds metadata into EXIF tags (ComfyUI format).
-    Returns True on success, False on error.
+    Worker function for ProcessPoolExecutor.
+    Expects tuple: (png_path, output_path)
+    Returns (success: bool, png_path: str)
     """
+    png_path, output_path = args
     try:
         img = Image.open(png_path)
         metadata_dict = extract_png_metadata(png_path)
@@ -86,9 +90,9 @@ def save_webp_with_metadata(png_path, output_path, quality=80, method=4, lossles
         img.save(
             output_path,
             format='WEBP',
-            quality=quality,
-            method=method,
-            lossless=lossless,
+            quality=80,
+            method=4,
+            lossless=False,
             exif=exif,
             optimize=True
         )
@@ -104,13 +108,13 @@ def save_webp_with_metadata(png_path, output_path, quality=80, method=4, lossles
         if saved_keys:
             print(f"   📦 Metadata saved: {saved_keys}")
         else:
-            print("   📦 No metadata to save")
+            print(f"   📦 No metadata to save from {os.path.basename(png_path)}")
 
-        return True
+        return True, png_path
 
     except Exception as e:
         print(f"❌ Error converting {png_path}: {e}")
-        return False
+        return False, png_path
 
 
 def process_directory(directory):
@@ -178,34 +182,45 @@ def main():
     webp_root = os.path.join(base_dir, "webp")
     os.makedirs(webp_root, exist_ok=True)
 
+    # Prepare argument list for multiprocessing
+    tasks = []
+    for png_path in files_to_convert:
+        date_folder = get_creation_date(png_path)
+        subfolder_path = os.path.join(webp_root, date_folder)
+        os.makedirs(subfolder_path, exist_ok=True)
+
+        filename = os.path.basename(png_path)
+        output_path = os.path.join(subfolder_path, os.path.splitext(filename)[0] + ".webp")
+        tasks.append((png_path, output_path))
+
+    # Determine number of worker processes (all CPU cores)
+    num_workers = multiprocessing.cpu_count()
+    print(f"⚙️ Using {num_workers} CPU cores for parallel conversion...")
+
     converted_count = 0
     failed_count = 0
 
     # Handle progress display with or without tqdm
     if HAS_TQDM:
-        iterable = tqdm(files_to_convert, desc="🔄 Converting PNG → WEBP", unit="file")
+        iterable = tqdm(tasks, desc="🔄 Converting PNG → WEBP", unit="file")
     else:
-        print(f"ℹ️ tqdm not installed. Using basic progress output.")
-        iterable = files_to_convert
+        print("ℹ️ tqdm not installed. Using basic progress output.")
+        iterable = tasks
 
-    for png_path in iterable:
-        try:
-            date_folder = get_creation_date(png_path)
-            subfolder_path = os.path.join(webp_root, date_folder)
-            os.makedirs(subfolder_path, exist_ok=True)
+    # Use ProcessPoolExecutor for parallel processing
+    with ProcessPoolExecutor(max_workers=num_workers) as executor:
+        futures = {executor.submit(save_webp_with_metadata, task): task for task in tasks}
 
-            filename = os.path.basename(png_path)
-            output_path = os.path.join(subfolder_path, os.path.splitext(filename)[0] + ".webp")
-
-            success = save_webp_with_metadata(png_path, output_path)
+        for future in as_completed(futures):
+            success, png_path = future.result()
             if success:
                 converted_count += 1
             else:
                 failed_count += 1
 
-        except Exception as e:
-            print(f"❌ Error processing {png_path}: {e}")
-            failed_count += 1
+            # tqdm updates inside the loop
+            if HAS_TQDM:
+                iterable.update(1)
 
     print(f"\n✅ Done! Converted: {converted_count}, Failed: {failed_count}")
     print(f"📁 Output folder: {webp_root}")
