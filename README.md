@@ -1,6 +1,4 @@
 # png2webp-comfyui
 PNG to WEBP with ComfyUI Metadata Preservation
 
-that script quick converts files and folders with a lot of PNGs, created by comfyui and preserves metadata
-just drag and drop png or folder with pngs to this script icon
-used a part of comfy code and qwen3next-80b-3a LLM
+Convert PNG files to WEBP while preserving ComfyUI metadata (prompt, workflow, extra_pnginfo). Supports drag & drop, recursive folder processing, and progress tracking. Based on original ComfyUI code, with assistance from Qwen-Next-80B-A3B-Instruct LLM for development and refinement.
